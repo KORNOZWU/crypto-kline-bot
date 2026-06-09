@@ -29,11 +29,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # Kraken 交易对命名规则：XBT=BTC, 用 "XBT/USD" 格式
 # interval 单位：分钟  60=1h  240=4h  1440=日线
 WATCH_LIST = [
-    {"symbol": "XBTUSD",  "pair": "XBT/USD",  "interval": 60},
-    {"symbol": "ETHUSD",  "pair": "ETH/USD",  "interval": 60},
-    {"symbol": "SOLUSD",  "pair": "SOL/USD",  "interval": 60},
-    {"symbol": "XBTUSD",  "pair": "XBT/USD",  "interval": 240},
-    {"symbol": "ETHUSD",  "pair": "ETH/USD",  "interval": 240},
+    {"symbol": "XBTUSD",  "pair": "XBTUSD",  "interval": 60},
+    {"symbol": "ETHUSD",  "pair": "ETHUSD",  "interval": 60},
+    {"symbol": "SOLUSD",  "pair": "SOLUSD",  "interval": 60},
+    {"symbol": "XBTUSD",  "pair": "XBTUSD",  "interval": 240},
+    {"symbol": "ETHUSD",  "pair": "ETHUSD",  "interval": 240},
 ]
 
 # 检测参数（可调整）
