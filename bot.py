@@ -1,7 +1,7 @@
 """
-Crypto K-Line Pattern Monitor Bot — Kraken Edition
-监测 Kraken K 线形态（1小时），发现目标形态后通过 Telegram 推送提醒
-核心形态：三连锤（连续3根锤子线：上方无引线/极短，下方长下影线）
+Crypto K-Line Short Signal Bot — Kraken Edition
+只检测「看跌吞没」形态，推送做空信号到 Telegram
+条件：上升趋势顶部 + 阴线完全吞没前根阳线 + 成交量放大
 """
 
 import os
@@ -23,11 +23,9 @@ log = logging.getLogger(__name__)
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 
-TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Kraken 交易对命名规则：XBT=BTC, 用 "XBT/USD" 格式
-# interval 单位：分钟  60=1h  240=4h  1440=日线
 WATCH_LIST = [
     {"symbol": "XBTUSD",  "pair": "XBTUSD",  "interval": 60},
     {"symbol": "ETHUSD",  "pair": "ETHUSD",  "interval": 60},
@@ -46,45 +44,26 @@ WATCH_LIST = [
     {"symbol": "ALGOUSD", "pair": "ALGOUSD", "interval": 60},
 ]
 
-# 检测参数（可调整）
+# 止盈止损设置
+TAKE_PROFIT_PCT = 1.3   # 止盈 1.3%
+STOP_LOSS_PCT   = 1.0   # 止损 1.0%
+
+# 检测参数
 PARAMS = {
-    # 三连锤 — 你图中圈出的形态
-    "triple_hammer": {
-        "enabled": True,
-        "min_lower_shadow_ratio": 2.0,  # 下影线 >= 实体 × 2
-        "max_upper_to_body":      0.2,  # 上引线 <= 实体 × 20%（几乎无上引线）
-        "min_body_ratio":         0.05, # 实体占整根K线 >= 5%（排除十字星）
-    },
-    # 单根锤子线（下跌趋势末端）
-    "single_hammer": {
-        "enabled": True,
-        "min_lower_shadow_ratio": 2.5,
-        "max_upper_to_body":      0.2,
-        "min_body_ratio":         0.05,
-        "require_downtrend":      True,
-    },
-    # 看涨吞没
-    "bullish_engulfing": {"enabled": True},
-    # 看跌吞没
-    "bearish_engulfing": {"enabled": True},
+    "require_uptrend":      True,
+    "require_volume_surge": True,
+    "volume_surge_ratio":   1.2,
+    "uptrend_candles":      5,
 }
 
-# 轮询间隔（秒）— 1小时K线每5分钟扫一次足够
 POLL_INTERVAL = 120
 
 # ─── Kraken K 线获取 ──────────────────────────────────────────────────────────
 
 KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
 
-async def fetch_klines(session: aiohttp.ClientSession, watch: dict, limit: int = 20):
-    """
-    从 Kraken 拉取 OHLC 数据
-    Kraken 返回格式：[time, open, high, low, close, vwap, volume, count]
-    """
-    params = {
-        "pair":     watch["pair"],
-        "interval": watch["interval"],   # 分钟数
-    }
+async def fetch_klines(session, watch, limit=20):
+    params = {"pair": watch["pair"], "interval": watch["interval"]}
     try:
         async with session.get(
             KRAKEN_OHLC_URL,
@@ -92,198 +71,98 @@ async def fetch_klines(session: aiohttp.ClientSession, watch: dict, limit: int =
             timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             data = await resp.json()
-
             if data.get("error"):
-                log.error(f"Kraken API 错误 {watch['pair']}: {data['error']}")
+                log.error(f"Kraken错误 {watch['pair']}: {data['error']}")
                 return []
-
-            # result key 是 pair 名称（可能带变体，如 XXBTZUSD）
             result_key = list(data["result"].keys())[0]
             rows = data["result"][result_key]
-
-            # 取最新 limit 根（Kraken 默认返回720根，最后一根是未完成的当前K线，去掉）
-            rows = rows[-(limit + 1): -1]
-
-            candles = []
-            for r in rows:
-                candles.append({
-                    "open_time": int(r[0]),
-                    "open":   float(r[1]),
-                    "high":   float(r[2]),
-                    "low":    float(r[3]),
-                    "close":  float(r[4]),
-                    "volume": float(r[6]),
-                })
-            return candles
-
+            rows = rows[-(limit + 1):-1]
+            return [{
+                "open_time": int(r[0]),
+                "open":   float(r[1]),
+                "high":   float(r[2]),
+                "low":    float(r[3]),
+                "close":  float(r[4]),
+                "volume": float(r[6]),
+            } for r in rows]
     except Exception as e:
-        log.error(f"获取 {watch['pair']} {watch['interval']}min K线失败: {e}")
+        log.error(f"获取 {watch['pair']} K线失败: {e}")
         return []
 
-# ─── K 线形态判断 ─────────────────────────────────────────────────────────────
-
-def candle_parts(c):
-    body         = abs(c["close"] - c["open"])
-    total        = c["high"] - c["low"]
-    if total == 0:
-        return None
-    upper_shadow = c["high"] - max(c["open"], c["close"])
-    lower_shadow = min(c["open"], c["close"]) - c["low"]
-    return {
-        "body":          body,
-        "total":         total,
-        "upper_shadow":  upper_shadow,
-        "lower_shadow":  lower_shadow,
-        "body_ratio":    body / total,
-        "upper_to_body": upper_shadow / body if body > 0 else 999,
-        "lower_to_body": lower_shadow / body if body > 0 else 0,
-        "is_bullish":    c["close"] >= c["open"],
-    }
-
-def is_hammer_candle(c, cfg):
-    """
-    锤子线条件：
-    ① 实体占比 >= min_body_ratio（排除十字星）
-    ② 下影线 >= 实体 × min_lower_shadow_ratio
-    ③ 上引线 <= 实体 × max_upper_to_body
-    """
-    p = candle_parts(c)
-    if p is None:
-        return False
-    if p["body_ratio"] < cfg["min_body_ratio"]:
-        return False
-    if p["lower_to_body"] < cfg["min_lower_shadow_ratio"]:
-        return False
-    if p["upper_to_body"] > cfg["max_upper_to_body"]:
-        return False
-    return True
-
-def detect_triple_hammer(candles, cfg):
-    """连续3根都是锤子线"""
-    if len(candles) < 3:
-        return False
-    return all(is_hammer_candle(c, cfg) for c in candles[-3:])
-
-def detect_single_hammer(candles, cfg):
-    """最新一根是锤子线，且前5根整体下跌"""
-    if len(candles) < 6:
-        return False
-    if not is_hammer_candle(candles[-1], cfg):
-        return False
-    if cfg.get("require_downtrend"):
-        prev = candles[-6:-1]
-        return prev[-1]["close"] < prev[0]["close"]
-    return True
-
-def detect_bullish_engulfing(candles):
-    if len(candles) < 2:
-        return False
-    prev, curr = candles[-2], candles[-1]
-    return (
-        prev["close"] < prev["open"] and          # 前根阴线
-        curr["close"] > curr["open"] and          # 当根阳线
-        curr["open"]  <= prev["close"] and        # 开盘低于前收
-        curr["close"] >= prev["open"]             # 收盘高于前开
-    )
+# ─── 看跌吞没检测 ─────────────────────────────────────────────────────────────
 
 def detect_bearish_engulfing(candles):
-    if len(candles) < 2:
+    if len(candles) < 7:
         return False
-    prev, curr = candles[-2], candles[-1]
-    return (
-        prev["close"] > prev["open"] and
-        curr["close"] < curr["open"] and
-        curr["open"]  >= prev["close"] and
-        curr["close"] <= prev["open"]
-    )
 
-# ─── 形态检测入口 ─────────────────────────────────────────────────────────────
+    prev = candles[-2]
+    curr = candles[-1]
 
-def detect_patterns(candles, watch):
-    alerts = []
-    latest    = candles[-1]
-    price     = latest["close"]
-    symbol    = watch["symbol"]
-    interval  = watch["interval"]
-    dt = datetime.utcfromtimestamp(latest["open_time"]).strftime("%m-%d %H:%M")
+    # 前根阳线
+    if prev["close"] <= prev["open"]:
+        return False
+    # 当根阴线
+    if curr["close"] >= curr["open"]:
+        return False
+    # 完全吞没
+    if not (curr["open"] >= prev["close"] and curr["close"] <= prev["open"]):
+        return False
+    # 上升趋势
+    if PARAMS["require_uptrend"]:
+        trend = candles[-7:-2]
+        if trend[-1]["close"] <= trend[0]["close"]:
+            return False
+    # 成交量放大
+    if PARAMS["require_volume_surge"]:
+        avg_vol = sum(c["volume"] for c in candles[-7:-2]) / 5
+        if avg_vol > 0 and curr["volume"] < avg_vol * PARAMS["volume_surge_ratio"]:
+            return False
 
-    interval_label = {60: "1小时", 240: "4小时", 1440: "日线"}.get(interval, f"{interval}min")
-
-    base = {"symbol": symbol, "interval": interval_label, "price": price, "time": dt}
-
-    if PARAMS["triple_hammer"]["enabled"] and detect_triple_hammer(candles, PARAMS["triple_hammer"]):
-        alerts.append({**base,
-            "pattern": "🔨 三连锤",
-            "signal":  "强烈看涨反转",
-            "emoji":   "🟢",
-            "desc":    "连续3根锤子线（无上引线＋长下影），是强烈的底部反转信号",
-        })
-
-    if PARAMS["single_hammer"]["enabled"] and detect_single_hammer(candles, PARAMS["single_hammer"]):
-        alerts.append({**base,
-            "pattern": "🔨 锤子线",
-            "signal":  "潜在反转",
-            "emoji":   "🟡",
-            "desc":    "下跌趋势末端出现锤子线，注意可能反转",
-        })
-
-    if PARAMS["bullish_engulfing"]["enabled"] and detect_bullish_engulfing(candles):
-        alerts.append({**base,
-            "pattern": "📈 看涨吞没",
-            "signal":  "看涨反转",
-            "emoji":   "🟢",
-            "desc":    "阳线完全吞没前根阴线，买入信号",
-        })
-
-    if PARAMS["bearish_engulfing"]["enabled"] and detect_bearish_engulfing(candles):
-        alerts.append({**base,
-            "pattern": "📉 看跌吞没",
-            "signal":  "看跌反转",
-            "emoji":   "🔴",
-            "desc":    "阴线完全吞没前根阳线，注意下行风险",
-        })
-
-    return alerts
+    return True
 
 # ─── Telegram 推送 ────────────────────────────────────────────────────────────
 
-async def send_telegram(session: aiohttp.ClientSession, message: str):
+async def send_telegram(session, message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             result = await resp.json()
             if not result.get("ok"):
-                log.error(f"Telegram 发送失败: {result}")
+                log.error(f"Telegram失败: {result}")
             else:
-                log.info("✅ Telegram 消息已发送")
+                log.info("✅ Telegram已发送")
     except Exception as e:
-        log.error(f"Telegram 异常: {e}")
+        log.error(f"Telegram异常: {e}")
 
-def format_alert(alert):
+def format_alert(symbol, interval_label, price, dt):
+    tp_price = price * (1 - TAKE_PROFIT_PCT / 100)
+    sl_price = price * (1 + STOP_LOSS_PCT   / 100)
     return (
-        f"{alert['emoji']} <b>Kraken K线信号</b>\n"
+        f"🔴 <b>做空信号 — Kraken</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"📌 形态：{alert['pattern']}\n"
-        f"🎯 信号：{alert['signal']}\n"
-        f"💰 交易对：<b>{alert['symbol']}</b>\n"
-        f"⏱ 时间级别：{alert['interval']}\n"
-        f"💵 当前价格：<code>${alert['price']:,.2f}</code>\n"
-        f"🕐 K线时间：{alert['time']} UTC\n"
+        f"📌 形态：📉 看跌吞没\n"
+        f"💰 交易对：<b>{symbol}</b>\n"
+        f"⏱ 时间级别：{interval_label}\n"
+        f"🕐 K线时间：{dt} UTC\n"
         f"━━━━━━━━━━━━━━\n"
-        f"📝 {alert['desc']}\n"
+        f"💵 入场价：<code>${price:,.2f}</code>\n"
+        f"🎯 止盈价：<code>${tp_price:,.2f}</code>  (-{TAKE_PROFIT_PCT}%)\n"
+        f"🛑 止损价：<code>${sl_price:,.2f}</code>  (+{STOP_LOSS_PCT}%)\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"📝 上升趋势顶部看跌吞没\n"
+        f"成交量放大确认，做空概率 ~70%\n"
         f"\n⚠️ 仅供参考，注意风险管理"
     )
 
-# ─── 去重（同信号冷却60分钟）────────────────────────────────────────────────────
+# ─── 去重 ────────────────────────────────────────────────────────────────────
 
 class AlertDedup:
     def __init__(self, cooldown_min=60):
         self._seen = {}
         self._cooldown = cooldown_min * 60
 
-    def should_send(self, alert):
-        key = f"{alert['symbol']}_{alert['interval']}_{alert['pattern']}"
+    def should_send(self, key):
         now = time.time()
         if key in self._seen and now - self._seen[key] < self._cooldown:
             return False
@@ -295,37 +174,41 @@ dedup = AlertDedup(cooldown_min=60)
 # ─── 主循环 ───────────────────────────────────────────────────────────────────
 
 async def run():
-    log.info("🚀 Kraken K线监控 Bot 启动")
-    pairs_str = ", ".join(f"{w['pair']}({w['interval']}min)" for w in WATCH_LIST)
-    log.info(f"监控列表: {pairs_str}")
+    log.info("🚀 做空信号 Bot 启动")
+    pairs_str = ", ".join(w["symbol"] for w in WATCH_LIST)
 
     async with aiohttp.ClientSession() as session:
         await send_telegram(session,
-            f"🤖 <b>Kraken K线监控 Bot 已启动</b>\n"
-            f"监控中: {pairs_str}\n"
+            f"🤖 <b>做空信号 Bot 已启动</b>\n"
+            f"📌 监测形态：看跌吞没\n"
+            f"🎯 止盈：{TAKE_PROFIT_PCT}%  🛑 止损：{STOP_LOSS_PCT}%\n"
+            f"监控: {pairs_str}\n"
             f"扫描间隔: 每{POLL_INTERVAL//60}分钟"
         )
 
         while True:
-            log.info("--- 开始新一轮扫描 ---")
+            log.info("--- 开始扫描 ---")
             for watch in WATCH_LIST:
                 try:
                     candles = await fetch_klines(session, watch, limit=20)
                     if not candles:
                         continue
 
-                    alerts = detect_patterns(candles, watch)
-                    for alert in alerts:
-                        if dedup.should_send(alert):
-                            log.info(f"🔔 触发: {alert['pattern']} @ {alert['symbol']} {alert['interval']}")
-                            await send_telegram(session, format_alert(alert))
-                        else:
-                            log.debug(f"去重跳过: {alert['pattern']} @ {alert['symbol']}")
+                    if detect_bearish_engulfing(candles):
+                        latest = candles[-1]
+                        price  = latest["close"]
+                        dt     = datetime.utcfromtimestamp(latest["open_time"]).strftime("%m-%d %H:%M")
+                        interval_label = {60: "1小时", 240: "4小时"}.get(watch["interval"], f"{watch['interval']}min")
+                        key    = f"{watch['symbol']}_{watch['interval']}"
+
+                        if dedup.should_send(key):
+                            log.info(f"🔴 做空信号: {watch['symbol']} @ ${price:,.2f}")
+                            await send_telegram(session, format_alert(watch["symbol"], interval_label, price, dt))
 
                 except Exception as e:
-                    log.error(f"处理 {watch['pair']} 时出错: {e}")
+                    log.error(f"处理 {watch['pair']} 出错: {e}")
 
-                await asyncio.sleep(2)  # Kraken 限速友好间隔
+                await asyncio.sleep(2)
 
             log.info(f"扫描完成，{POLL_INTERVAL}秒后下次扫描...")
             await asyncio.sleep(POLL_INTERVAL)
