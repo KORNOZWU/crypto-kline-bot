@@ -32,8 +32,18 @@ WATCH_LIST = [
     {"symbol": "XBTUSD",  "pair": "XBTUSD",  "interval": 60},
     {"symbol": "ETHUSD",  "pair": "ETHUSD",  "interval": 60},
     {"symbol": "SOLUSD",  "pair": "SOLUSD",  "interval": 60},
-    {"symbol": "XBTUSD",  "pair": "XBTUSD",  "interval": 240},
-    {"symbol": "ETHUSD",  "pair": "ETHUSD",  "interval": 240},
+    {"symbol": "XRPUSD",  "pair": "XRPUSD",  "interval": 60},
+    {"symbol": "ADAUSD",  "pair": "ADAUSD",  "interval": 60},
+    {"symbol": "DOTUSD",  "pair": "DOTUSD",  "interval": 60},
+    {"symbol": "LINKUSD", "pair": "LINKUSD", "interval": 60},
+    {"symbol": "AVAXUSD", "pair": "AVAXUSD", "interval": 60},
+    {"symbol": "LTCUSD",  "pair": "LTCUSD",  "interval": 60},
+    {"symbol": "UNIUSD",  "pair": "UNIUSD",  "interval": 60},
+    {"symbol": "MATICUSD","pair": "MATICUSD","interval": 60},
+    {"symbol": "ATOMUSD", "pair": "ATOMUSD", "interval": 60},
+    {"symbol": "FILUSD",  "pair": "FILUSD",  "interval": 60},
+    {"symbol": "NEARUSD", "pair": "NEARUSD", "interval": 60},
+    {"symbol": "ALGOUSD", "pair": "ALGOUSD", "interval": 60},
 ]
 
 # 检测参数（可调整）
@@ -60,7 +70,7 @@ PARAMS = {
 }
 
 # 轮询间隔（秒）— 1小时K线每5分钟扫一次足够
-POLL_INTERVAL = 300
+POLL_INTERVAL = 120
 
 # ─── Kraken K 线获取 ──────────────────────────────────────────────────────────
 
