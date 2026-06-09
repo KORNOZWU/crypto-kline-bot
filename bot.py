@@ -1,7 +1,11 @@
 """
 Crypto K-Line Short Signal Bot — Kraken Edition
-只检测「看跌吞没」形态，推送做空信号到 Telegram
-条件：上升趋势顶部 + 阴线完全吞没前根阳线 + 成交量放大
+检测严格版「看跌吞没」：
+- 前方上升趋势
+- 两根柱子顶部平行（高度相近）
+- 红柱最高价 > 绿柱最高价
+- 红柱实体完全吞没绿柱实体
+- 成交量放大
 """
 
 import os
@@ -27,33 +31,32 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 WATCH_LIST = [
-    {"symbol": "XBTUSD",  "pair": "XBTUSD",  "interval": 60},
-    {"symbol": "ETHUSD",  "pair": "ETHUSD",  "interval": 60},
-    {"symbol": "SOLUSD",  "pair": "SOLUSD",  "interval": 60},
-    {"symbol": "XRPUSD",  "pair": "XRPUSD",  "interval": 60},
-    {"symbol": "ADAUSD",  "pair": "ADAUSD",  "interval": 60},
-    {"symbol": "DOTUSD",  "pair": "DOTUSD",  "interval": 60},
-    {"symbol": "LINKUSD", "pair": "LINKUSD", "interval": 60},
-    {"symbol": "AVAXUSD", "pair": "AVAXUSD", "interval": 60},
-    {"symbol": "LTCUSD",  "pair": "LTCUSD",  "interval": 60},
-    {"symbol": "UNIUSD",  "pair": "UNIUSD",  "interval": 60},
-    {"symbol": "MATICUSD","pair": "MATICUSD","interval": 60},
-    {"symbol": "ATOMUSD", "pair": "ATOMUSD", "interval": 60},
-    {"symbol": "FILUSD",  "pair": "FILUSD",  "interval": 60},
-    {"symbol": "NEARUSD", "pair": "NEARUSD", "interval": 60},
-    {"symbol": "ALGOUSD", "pair": "ALGOUSD", "interval": 60},
+    {"symbol": "SOLUSDC",  "pair": "SOLUSDC",  "interval": 60},
+    {"symbol": "AVAXUSDC", "pair": "AVAXUSDC", "interval": 60},
+    {"symbol": "LINKUSDC", "pair": "LINKUSDC", "interval": 60},
+    {"symbol": "NEARUSDC", "pair": "NEARUSDC", "interval": 60},
+    {"symbol": "DOTUSDC",  "pair": "DOTUSDC",  "interval": 60},
+    {"symbol": "MATICUSDC","pair": "MATICUSDC","interval": 60},
+    {"symbol": "ATOMUSDC", "pair": "ATOMUSDC", "interval": 60},
+    {"symbol": "UNIUSDC",  "pair": "UNIUSDC",  "interval": 60},
+    {"symbol": "FILUSDC",  "pair": "FILUSDC",  "interval": 60},
+    {"symbol": "ALGOUSDC", "pair": "ALGOUSDC", "interval": 60},
+    {"symbol": "INJUSDC",  "pair": "INJUSDC",  "interval": 60},
+    {"symbol": "SUIUSDC",  "pair": "SUIUSDC",  "interval": 60},
+    {"symbol": "APTUSDC",  "pair": "APTUSDC",  "interval": 60},
+    {"symbol": "OPUSDC",   "pair": "OPUSDC",   "interval": 60},
+    {"symbol": "ARBUSDC",  "pair": "ARBUSDC",  "interval": 60},
 ]
 
-# 止盈止损设置
-TAKE_PROFIT_PCT = 1.3   # 止盈 1.3%
-STOP_LOSS_PCT   = 1.0   # 止损 1.0%
+# 止盈止损
+TAKE_PROFIT_PCT = 1.3
+STOP_LOSS_PCT   = 1.0
 
 # 检测参数
 PARAMS = {
-    "require_uptrend":      True,
-    "require_volume_surge": True,
-    "volume_surge_ratio":   1.2,
-    "uptrend_candles":      5,
+    "uptrend_candles":       5,      # 前N根判断上升趋势
+    "parallel_top_pct":      0.5,    # 两根柱子顶部高度差 <= 0.5%（平行）
+    "volume_surge_ratio":    1.2,    # 成交量 >= 前5根均量 × 1.2
 }
 
 POLL_INTERVAL = 120
@@ -89,34 +92,55 @@ async def fetch_klines(session, watch, limit=20):
         log.error(f"获取 {watch['pair']} K线失败: {e}")
         return []
 
-# ─── 看跌吞没检测 ─────────────────────────────────────────────────────────────
+# ─── 严格版看跌吞没检测 ───────────────────────────────────────────────────────
 
 def detect_bearish_engulfing(candles):
+    """
+    严格条件：
+    1. 前5根整体上涨（上升趋势）
+    2. 前根是阳线（绿柱）
+    3. 当根是阴线（红柱）
+    4. 两根柱子最高价相近（顶部平行，差距 <= 0.5%）
+    5. 红柱最高价 > 绿柱最高价（红柱上影线超过绿柱）
+    6. 红柱收盘 < 绿柱开盘（实体完全吞没）
+    7. 成交量放大
+    """
     if len(candles) < 7:
         return False
 
-    prev = candles[-2]
-    curr = candles[-1]
+    prev = candles[-2]  # 绿柱
+    curr = candles[-1]  # 红柱
 
-    # 前根阳线
+    # 条件1：上升趋势
+    trend = candles[-7:-2]
+    if trend[-1]["close"] <= trend[0]["close"]:
+        return False
+
+    # 条件2：前根阳线
     if prev["close"] <= prev["open"]:
         return False
-    # 当根阴线
+
+    # 条件3：当根阴线
     if curr["close"] >= curr["open"]:
         return False
-    # 完全吞没
-    if not (curr["open"] >= prev["close"] and curr["close"] <= prev["open"]):
+
+    # 条件4：顶部平行（两根最高价差距 <= 0.5%）
+    high_diff_pct = abs(curr["high"] - prev["high"]) / prev["high"] * 100
+    if high_diff_pct > PARAMS["parallel_top_pct"]:
         return False
-    # 上升趋势
-    if PARAMS["require_uptrend"]:
-        trend = candles[-7:-2]
-        if trend[-1]["close"] <= trend[0]["close"]:
-            return False
-    # 成交量放大
-    if PARAMS["require_volume_surge"]:
-        avg_vol = sum(c["volume"] for c in candles[-7:-2]) / 5
-        if avg_vol > 0 and curr["volume"] < avg_vol * PARAMS["volume_surge_ratio"]:
-            return False
+
+    # 条件5：红柱最高价 > 绿柱最高价
+    if curr["high"] <= prev["high"]:
+        return False
+
+    # 条件6：红柱收盘 < 绿柱开盘（实体完全吞没）
+    if curr["close"] >= prev["open"]:
+        return False
+
+    # 条件7：成交量放大
+    avg_vol = sum(c["volume"] for c in candles[-7:-2]) / 5
+    if avg_vol > 0 and curr["volume"] < avg_vol * PARAMS["volume_surge_ratio"]:
+        return False
 
     return True
 
@@ -141,17 +165,19 @@ def format_alert(symbol, interval_label, price, dt):
     return (
         f"🔴 <b>做空信号 — Kraken</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"📌 形态：📉 看跌吞没\n"
+        f"📌 形态：📉 看跌吞没（严格版）\n"
         f"💰 交易对：<b>{symbol}</b>\n"
         f"⏱ 时间级别：{interval_label}\n"
         f"🕐 K线时间：{dt} UTC\n"
         f"━━━━━━━━━━━━━━\n"
-        f"💵 入场价：<code>${price:,.2f}</code>\n"
-        f"🎯 止盈价：<code>${tp_price:,.2f}</code>  (-{TAKE_PROFIT_PCT}%)\n"
-        f"🛑 止损价：<code>${sl_price:,.2f}</code>  (+{STOP_LOSS_PCT}%)\n"
+        f"💵 入场价：<code>${price:,.4f}</code>\n"
+        f"🎯 止盈价：<code>${tp_price:,.4f}</code>  (-{TAKE_PROFIT_PCT}%)\n"
+        f"🛑 止损价：<code>${sl_price:,.4f}</code>  (+{STOP_LOSS_PCT}%)\n"
         f"━━━━━━━━━━━━━━\n"
-        f"📝 上升趋势顶部看跌吞没\n"
-        f"成交量放大确认，做空概率 ~70%\n"
+        f"✅ 上升趋势顶部\n"
+        f"✅ 顶部平行（阻力位）\n"
+        f"✅ 红柱突破绿柱高点\n"
+        f"✅ 成交量放大确认\n"
         f"\n⚠️ 仅供参考，注意风险管理"
     )
 
@@ -174,13 +200,13 @@ dedup = AlertDedup(cooldown_min=60)
 # ─── 主循环 ───────────────────────────────────────────────────────────────────
 
 async def run():
-    log.info("🚀 做空信号 Bot 启动")
+    log.info("🚀 做空信号 Bot 启动（严格版）")
     pairs_str = ", ".join(w["symbol"] for w in WATCH_LIST)
 
     async with aiohttp.ClientSession() as session:
         await send_telegram(session,
-            f"🤖 <b>做空信号 Bot 已启动</b>\n"
-            f"📌 监测形态：看跌吞没\n"
+            f"🤖 <b>做空信号 Bot 已启动（严格版）</b>\n"
+            f"📌 形态：看跌吞没\n"
             f"🎯 止盈：{TAKE_PROFIT_PCT}%  🛑 止损：{STOP_LOSS_PCT}%\n"
             f"监控: {pairs_str}\n"
             f"扫描间隔: 每{POLL_INTERVAL//60}分钟"
@@ -202,7 +228,7 @@ async def run():
                         key    = f"{watch['symbol']}_{watch['interval']}"
 
                         if dedup.should_send(key):
-                            log.info(f"🔴 做空信号: {watch['symbol']} @ ${price:,.2f}")
+                            log.info(f"🔴 做空信号: {watch['symbol']} @ ${price:,.4f}")
                             await send_telegram(session, format_alert(watch["symbol"], interval_label, price, dt))
 
                 except Exception as e:
