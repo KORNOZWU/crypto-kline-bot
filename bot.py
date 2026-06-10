@@ -1,11 +1,7 @@
 """
 Crypto K-Line Short Signal Bot — Kraken Edition
-检测严格版「看跌吞没」：
-- 前方上升趋势
-- 两根柱子顶部平行（高度相近）
-- 红柱最高价 > 绿柱最高价
-- 红柱实体完全吞没绿柱实体
-- 成交量放大
+启动时自动从 Kraken API 获取最新支持杠杆的 USD 交易对
+严格版看跌吞没5条件做空信号
 """
 
 import os
@@ -30,45 +26,80 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-WATCH_LIST = [
-    {"symbol": "SOLUSD",  "pair": "SOLUSD",  "interval": 60},
-    {"symbol": "AVAXUSD", "pair": "AVAXUSD", "interval": 60},
-    {"symbol": "LINKUSD", "pair": "LINKUSD", "interval": 60},
-    {"symbol": "NEARUSD", "pair": "NEARUSD", "interval": 60},
-    {"symbol": "DOTUSD",  "pair": "DOTUSD",  "interval": 60},
-    {"symbol": "MATICUSD","pair": "MATICUSD","interval": 60},
-    {"symbol": "ATOMUSD", "pair": "ATOMUSD", "interval": 60},
-    {"symbol": "UNIUSD",  "pair": "UNIUSD",  "interval": 60},
-    {"symbol": "FILUSD",  "pair": "FILUSD",  "interval": 60},
-    {"symbol": "ALGOUSD", "pair": "ALGOUSD", "interval": 60},
-    {"symbol": "INJUSD",  "pair": "INJUSD",  "interval": 60},
-    {"symbol": "SUIUSD",  "pair": "SUIUSD",  "interval": 60},
-    {"symbol": "APTUSD",  "pair": "APTUSD",  "interval": 60},
-    {"symbol": "OPUSD",   "pair": "OPUSD",   "interval": 60},
-    {"symbol": "ARBUSD",  "pair": "ARBUSD",  "interval": 60},
-    {"symbol": "FTMUSD",  "pair": "FTMUSD",  "interval": 60},
-    {"symbol": "SANDUSD", "pair": "SANDUSD", "interval": 60},
-    {"symbol": "MANAUSD", "pair": "MANAUSD", "interval": 60},
-    {"symbol": "GALAUSD", "pair": "GALAUSD", "interval": 60},
-    {"symbol": "APEUSD",  "pair": "APEUSD",  "interval": 60},
-]
-
 # 止盈止损
 TAKE_PROFIT_PCT = 1.3
 STOP_LOSS_PCT   = 1.0
 
 # 检测参数
 PARAMS = {
-    "uptrend_candles":       5,      # 前N根判断上升趋势
-    "parallel_top_pct":      1.0,    # 两根柱子顶部高度差 <= 0.5%（平行）
-    "volume_surge_ratio":    1.2,    # 成交量 >= 前5根均量 × 1.2
+    "min_green_candles":  3,    # 前方至少3根绿柱逐渐上升
+    "parallel_top_pct":   1.5,  # 两根顶部差距 <= 1.5%
+    "volume_surge_ratio": 1.2,  # 成交量 >= 前5根均量 × 1.2
 }
 
-POLL_INTERVAL = 120
+POLL_INTERVAL = 120  # 每2分钟扫一次
 
-# ─── Kraken K 线获取 ──────────────────────────────────────────────────────────
+# ─── 自动获取 Kraken 杠杆 USD 交易对 ─────────────────────────────────────────
 
-KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
+KRAKEN_ASSET_PAIRS_URL = "https://api.kraken.com/0/public/AssetPairs"
+KRAKEN_OHLC_URL        = "https://api.kraken.com/0/public/OHLC"
+
+async def fetch_margin_usd_pairs(session):
+    """
+    从 Kraken API 实时获取所有支持杠杆的 USD 交易对
+    过滤条件：quote=ZUSD 或 USD，leverage_buy 不为空
+    排除稳定币对稳定币
+    """
+    try:
+        async with session.get(
+            KRAKEN_ASSET_PAIRS_URL,
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            data = await resp.json()
+            if data.get("error"):
+                log.error(f"获取交易对失败: {data['error']}")
+                return []
+
+            pairs = []
+            for pair_name, info in data["result"].items():
+                # 只要 USD 计价
+                quote = info.get("quote", "")
+                if quote not in ("ZUSD", "USD"):
+                    continue
+                # 必须支持杠杆
+                leverage_buy = info.get("leverage_buy", [])
+                if not leverage_buy:
+                    continue
+                # 排除暗池（.d结尾）
+                if pair_name.endswith(".d"):
+                    continue
+                # 排除稳定币（USDT/USDC/DAI/PAX 本身）
+                base = info.get("base", "")
+                stables = {"USDT", "USDC", "DAI", "ZUSD", "PAXG", "XAUT"}
+                if base in stables:
+                    continue
+
+                # 用 altname 作为 API 查询用的 pair
+                altname = info.get("altname", pair_name)
+                symbol = altname.replace("/", "").replace("XBT", "BTC")
+
+                pairs.append({
+                    "symbol":   symbol,
+                    "pair":     altname,
+                    "interval": 60,
+                    "max_lev":  max(leverage_buy),
+                })
+
+            # 按最大杠杆倍数排序，优先监控杠杆高的
+            pairs.sort(key=lambda x: x["max_lev"], reverse=True)
+            log.info(f"✅ 获取到 {len(pairs)} 个支持杠杆的 USD 交易对")
+            return pairs
+
+    except Exception as e:
+        log.error(f"获取交易对异常: {e}")
+        return []
+
+# ─── K 线获取 ─────────────────────────────────────────────────────────────────
 
 async def fetch_klines(session, watch, limit=20):
     params = {"pair": watch["pair"], "interval": watch["interval"]}
@@ -80,7 +111,6 @@ async def fetch_klines(session, watch, limit=20):
         ) as resp:
             data = await resp.json()
             if data.get("error"):
-                log.error(f"Kraken错误 {watch['pair']}: {data['error']}")
                 return []
             result_key = list(data["result"].keys())[0]
             rows = data["result"][result_key]
@@ -93,56 +123,59 @@ async def fetch_klines(session, watch, limit=20):
                 "close":  float(r[4]),
                 "volume": float(r[6]),
             } for r in rows]
-    except Exception as e:
-        log.error(f"获取 {watch['pair']} K线失败: {e}")
+    except Exception:
         return []
 
-# ─── 严格版看跌吞没检测 ───────────────────────────────────────────────────────
+# ─── 严格版看跌吞没检测（5条件）─────────────────────────────────────────────────
 
 def detect_bearish_engulfing(candles):
     """
-    严格条件：
-    1. 前5根整体上涨（上升趋势）
-    2. 前根是阳线（绿柱）
-    3. 当根是阴线（红柱）
-    4. 两根柱子最高价相近（顶部平行，差距 <= 0.5%）
-    5. 红柱最高价 > 绿柱最高价（红柱上影线超过绿柱）
-    6. 红柱收盘 < 绿柱开盘（实体完全吞没）
-    7. 成交量放大
+    条件1：前方至少3根绿柱收盘价逐渐升高
+    条件2：前根阳线（绿柱）
+    条件3：当根阴线实体完全吞没前根阳线实体
+    条件4：两根顶部平行（差距 <= 1.5%）
+    条件5：红柱最高价严格大于绿柱最高价（上引线突破）
+    +成交量放大
     """
-    if len(candles) < 7:
+    if len(candles) < 8:
         return False
 
-    prev = candles[-2]  # 绿柱
-    curr = candles[-1]  # 红柱
-
-    # 条件1：上升趋势
-    trend = candles[-7:-2]
-    if trend[-1]["close"] <= trend[0]["close"]:
-        return False
+    prev = candles[-2]
+    curr = candles[-1]
 
     # 条件2：前根阳线
     if prev["close"] <= prev["open"]:
         return False
-
-    # 条件3：当根阴线
+    # 条件2：当根阴线
     if curr["close"] >= curr["open"]:
         return False
 
-    # 条件4：顶部平行（两根最高价差距 <= 0.5%）
+    # 条件1：前3根绿柱收盘逐渐升高且都是阳线
+    n = PARAMS["min_green_candles"]
+    prior = candles[-(2 + n):-2]
+    if len(prior) < n:
+        return False
+    for c in prior:
+        if c["close"] <= c["open"]:
+            return False
+    for i in range(1, len(prior)):
+        if prior[i]["close"] <= prior[i-1]["close"]:
+            return False
+
+    # 条件3：实体完全吞没
+    if curr["close"] >= prev["open"]:
+        return False
+
+    # 条件4：顶部平行（差距 <= 1.5%）
     high_diff_pct = abs(curr["high"] - prev["high"]) / prev["high"] * 100
     if high_diff_pct > PARAMS["parallel_top_pct"]:
         return False
 
-    # 条件5：红柱最高价 > 绿柱最高价
+    # 条件5：红柱最高价严格 > 绿柱最高价
     if curr["high"] <= prev["high"]:
         return False
 
-    # 条件6：红柱收盘 < 绿柱开盘（实体完全吞没）
-    if curr["close"] >= prev["open"]:
-        return False
-
-    # 条件7：成交量放大
+    # 成交量放大
     avg_vol = sum(c["volume"] for c in candles[-7:-2]) / 5
     if avg_vol > 0 and curr["volume"] < avg_vol * PARAMS["volume_surge_ratio"]:
         return False
@@ -164,24 +197,26 @@ async def send_telegram(session, message):
     except Exception as e:
         log.error(f"Telegram异常: {e}")
 
-def format_alert(symbol, interval_label, price, dt):
+def format_alert(symbol, interval_label, price, dt, max_lev):
     tp_price = price * (1 - TAKE_PROFIT_PCT / 100)
     sl_price = price * (1 + STOP_LOSS_PCT   / 100)
     return (
         f"🔴 <b>做空信号 — Kraken</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"📌 形态：📉 看跌吞没（严格版）\n"
+        f"📌 形态：📉 看跌吞没\n"
         f"💰 交易对：<b>{symbol}</b>\n"
+        f"⚡️ 最高杠杆：{max_lev}x\n"
         f"⏱ 时间级别：{interval_label}\n"
-        f"🕐 K线时间：{dt} UTC\n"
+        f"🕐 {dt} UTC\n"
         f"━━━━━━━━━━━━━━\n"
         f"💵 入场价：<code>${price:,.4f}</code>\n"
         f"🎯 止盈价：<code>${tp_price:,.4f}</code>  (-{TAKE_PROFIT_PCT}%)\n"
         f"🛑 止损价：<code>${sl_price:,.4f}</code>  (+{STOP_LOSS_PCT}%)\n"
         f"━━━━━━━━━━━━━━\n"
-        f"✅ 上升趋势顶部\n"
+        f"✅ 前3根绿柱逐渐上升\n"
+        f"✅ 红柱实体完全吞没绿柱\n"
         f"✅ 顶部平行（阻力位）\n"
-        f"✅ 红柱突破绿柱高点\n"
+        f"✅ 红柱上引线突破绿柱\n"
         f"✅ 成交量放大确认\n"
         f"\n⚠️ 仅供参考，注意风险管理"
     )
@@ -205,21 +240,45 @@ dedup = AlertDedup(cooldown_min=60)
 # ─── 主循环 ───────────────────────────────────────────────────────────────────
 
 async def run():
-    log.info("🚀 做空信号 Bot 启动（严格版）")
-    pairs_str = ", ".join(w["symbol"] for w in WATCH_LIST)
+    log.info("🚀 做空信号 Bot 启动")
 
     async with aiohttp.ClientSession() as session:
+        # 启动时自动获取最新杠杆交易对
+        watch_list = await fetch_margin_usd_pairs(session)
+        if not watch_list:
+            log.error("无法获取交易对，使用备用列表")
+            watch_list = [
+                {"symbol": "SOLUSD",  "pair": "SOL/USD",  "interval": 60, "max_lev": 10},
+                {"symbol": "ETHUSD",  "pair": "ETH/USD",  "interval": 60, "max_lev": 10},
+                {"symbol": "BTCUSD",  "pair": "XBT/USD",  "interval": 60, "max_lev": 10},
+            ]
+
+        pairs_str = ", ".join(w["symbol"] for w in watch_list[:10]) + f"... 共{len(watch_list)}个"
+        log.info(f"监控列表: {pairs_str}")
+
         await send_telegram(session,
-            f"🤖 <b>做空信号 Bot 已启动（严格版）</b>\n"
-            f"📌 形态：看跌吞没\n"
+            f"🤖 <b>做空信号 Bot 已启动</b>\n"
+            f"📌 形态：看跌吞没（严格5条件）\n"
             f"🎯 止盈：{TAKE_PROFIT_PCT}%  🛑 止损：{STOP_LOSS_PCT}%\n"
-            f"监控: {pairs_str}\n"
-            f"扫描间隔: 每{POLL_INTERVAL//60}分钟"
+            f"📊 自动获取 Kraken 杠杆 USD 交易对：共 <b>{len(watch_list)}</b> 个\n"
+            f"扫描间隔：每{POLL_INTERVAL//60}分钟"
         )
 
+        # 每24小时刷新一次交易对列表
+        last_refresh = time.time()
+
         while True:
-            log.info("--- 开始扫描 ---")
-            for watch in WATCH_LIST:
+            # 每24小时重新拉取最新交易对
+            if time.time() - last_refresh > 86400:
+                log.info("刷新交易对列表...")
+                new_list = await fetch_margin_usd_pairs(session)
+                if new_list:
+                    watch_list = new_list
+                    last_refresh = time.time()
+                    log.info(f"交易对已更新，共 {len(watch_list)} 个")
+
+            log.info(f"--- 开始扫描 {len(watch_list)} 个交易对 ---")
+            for watch in watch_list:
                 try:
                     candles = await fetch_klines(session, watch, limit=20)
                     if not candles:
@@ -234,12 +293,14 @@ async def run():
 
                         if dedup.should_send(key):
                             log.info(f"🔴 做空信号: {watch['symbol']} @ ${price:,.4f}")
-                            await send_telegram(session, format_alert(watch["symbol"], interval_label, price, dt))
+                            await send_telegram(session, format_alert(
+                                watch["symbol"], interval_label, price, dt, watch["max_lev"]
+                            ))
 
                 except Exception as e:
                     log.error(f"处理 {watch['pair']} 出错: {e}")
 
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)  # 避免触发限速
 
             log.info(f"扫描完成，{POLL_INTERVAL}秒后下次扫描...")
             await asyncio.sleep(POLL_INTERVAL)
