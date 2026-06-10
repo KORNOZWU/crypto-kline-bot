@@ -46,6 +46,11 @@ WATCH_LIST = [
     {"symbol": "APTUSDC",  "pair": "APTUSDC",  "interval": 60},
     {"symbol": "OPUSDC",   "pair": "OPUSDC",   "interval": 60},
     {"symbol": "ARBUSDC",  "pair": "ARBUSDC",  "interval": 60},
+    {"symbol": "FTMUSDC",  "pair": "FTMUSDC",  "interval": 60},
+    {"symbol": "SANDUSDC", "pair": "SANDUSDC", "interval": 60},
+    {"symbol": "MANAUSDC", "pair": "MANAUSDC", "interval": 60},
+    {"symbol": "GALAUSDC", "pair": "GALAUSDC", "interval": 60},
+    {"symbol": "APEUSDC",  "pair": "APEUSDC",  "interval": 60},
 ]
 
 # 止盈止损
@@ -55,7 +60,7 @@ STOP_LOSS_PCT   = 1.0
 # 检测参数
 PARAMS = {
     "uptrend_candles":       5,      # 前N根判断上升趋势
-    "parallel_top_pct":      0.5,    # 两根柱子顶部高度差 <= 0.5%（平行）
+    "parallel_top_pct":      1.0,    # 两根柱子顶部高度差 <= 0.5%（平行）
     "volume_surge_ratio":    1.2,    # 成交量 >= 前5根均量 × 1.2
 }
 
