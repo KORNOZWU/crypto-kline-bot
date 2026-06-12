@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-TAKE_PROFIT_PCT = 1.3
+TAKE_PROFIT_PCT = 1.5
 STOP_LOSS_PCT   = 1.0
 
 PARAMS = {
@@ -182,9 +182,10 @@ async def send_telegram(session, message):
     except Exception as e:
         log.error(f"Telegram异常: {e}")
 
-def format_alert(symbol, interval_label, price, dt, max_lev):
-    tp_price = price * (1 - TAKE_PROFIT_PCT / 100)
-    sl_price = price * (1 + STOP_LOSS_PCT   / 100)
+def format_alert(symbol, interval_label, price, dt, max_lev, open_time):
+    tp_price   = price * (1 - TAKE_PROFIT_PCT / 100)
+    sl_price   = price * (1 + STOP_LOSS_PCT   / 100)
+    close_time = datetime.utcfromtimestamp(open_time + 4 * 3600).strftime("%m-%d %H:%M")
     return (
         f"🔴 <b>做空信号 — Kraken</b>\n"
         f"━━━━━━━━━━━━━━\n"
@@ -192,17 +193,17 @@ def format_alert(symbol, interval_label, price, dt, max_lev):
         f"💰 交易对：<b>{symbol}</b>\n"
         f"⚡️ 最高杠杆：{max_lev}x\n"
         f"⏱ 时间级别：{interval_label}\n"
-        f"🕐 {dt} UTC\n"
+        f"🕐 信号时间：{dt} UTC\n"
         f"━━━━━━━━━━━━━━\n"
         f"💵 入场价：<code>${price:,.4f}</code>\n"
         f"🎯 止盈价：<code>${tp_price:,.4f}</code>  (-{TAKE_PROFIT_PCT}%)\n"
         f"🛑 止损价：<code>${sl_price:,.4f}</code>  (+{STOP_LOSS_PCT}%)\n"
+        f"⏰ 建议平仓：<b>{close_time} UTC</b>（4小时后）\n"
         f"━━━━━━━━━━━━━━\n"
         f"✅ 局部反弹结构\n"
         f"✅ 红柱实体完全吞没绿柱\n"
         f"✅ 实体顶部平行（≤1.5%）\n"
         f"✅ 红柱引线突破绿柱引线\n"
-        f"✅ 成交量放大确认\n"
         f"\n⚠️ 仅供参考，注意风险管理"
     )
 
@@ -270,7 +271,7 @@ async def run():
                         if dedup.should_send(key):
                             log.info(f"🔴 做空信号: {watch['symbol']} @ ${price:,.4f}")
                             await send_telegram(session, format_alert(
-                                watch["symbol"], interval_label, price, dt, watch["max_lev"]
+                                watch["symbol"], interval_label, price, dt, watch["max_lev"], latest["open_time"]
                             ))
 
                 except Exception as e:
