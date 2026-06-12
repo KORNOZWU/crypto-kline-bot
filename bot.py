@@ -32,7 +32,6 @@ STOP_LOSS_PCT   = 1.0
 
 PARAMS = {
     "parallel_body_top_pct": 1.5,  # 实体顶部差距 <= 1.5%
-    "volume_surge_ratio":    1.2,  # 成交量 >= 前5根均量 × 1.2
 }
 
 POLL_INTERVAL = 120
@@ -43,42 +42,67 @@ KRAKEN_ASSET_PAIRS_URL = "https://api.kraken.com/0/public/AssetPairs"
 KRAKEN_OHLC_URL        = "https://api.kraken.com/0/public/OHLC"
 
 async def fetch_margin_usd_pairs(session):
+    KNOWN_PAIRS = [
+        {"symbol": "BTCUSD",  "pair": "XBT/USD",  "interval": 60, "max_lev": 10},
+        {"symbol": "ETHUSD",  "pair": "ETH/USD",  "interval": 60, "max_lev": 10},
+        {"symbol": "SOLUSD",  "pair": "SOL/USD",  "interval": 60, "max_lev": 10},
+        {"symbol": "XRPUSD",  "pair": "XRP/USD",  "interval": 60, "max_lev": 10},
+        {"symbol": "ADAUSD",  "pair": "ADA/USD",  "interval": 60, "max_lev": 10},
+        {"symbol": "DOGEUSD", "pair": "DOGE/USD", "interval": 60, "max_lev": 10},
+        {"symbol": "LTCUSD",  "pair": "LTC/USD",  "interval": 60, "max_lev": 10},
+        {"symbol": "LINKUSD", "pair": "LINK/USD", "interval": 60, "max_lev": 10},
+        {"symbol": "AVAXUSD", "pair": "AVAX/USD", "interval": 60, "max_lev": 10},
+        {"symbol": "SUIUSD",  "pair": "SUI/USD",  "interval": 60, "max_lev": 10},
+        {"symbol": "HYPEUSD", "pair": "HYPE/USD", "interval": 60, "max_lev": 5},
+        {"symbol": "ZECUSD",  "pair": "ZEC/USD",  "interval": 60, "max_lev": 5},
+        {"symbol": "NEARUSD", "pair": "NEAR/USD", "interval": 60, "max_lev": 3},
+        {"symbol": "XLMUSD",  "pair": "XLM/USD",  "interval": 60, "max_lev": 2},
+        {"symbol": "DOTUSD",  "pair": "DOT/USD",  "interval": 60, "max_lev": 5},
+        {"symbol": "ALGOUSD", "pair": "ALGO/USD", "interval": 60, "max_lev": 2},
+        {"symbol": "BCHUSD",  "pair": "BCH/USD",  "interval": 60, "max_lev": 5},
+        {"symbol": "UNIUSD",  "pair": "UNI/USD",  "interval": 60, "max_lev": 5},
+        {"symbol": "SHIBUSD", "pair": "SHIB/USD", "interval": 60, "max_lev": 5},
+        {"symbol": "AAVEUSD", "pair": "AAVE/USD", "interval": 60, "max_lev": 5},
+        {"symbol": "TRXUSD",  "pair": "TRX/USD",  "interval": 60, "max_lev": 5},
+        {"symbol": "CRVUSD",  "pair": "CRV/USD",  "interval": 60, "max_lev": 5},
+        {"symbol": "HBARUSD", "pair": "HBAR/USD", "interval": 60, "max_lev": 5},
+    ]
+    known_symbols = {p["symbol"] for p in KNOWN_PAIRS}
     try:
         async with session.get(
             KRAKEN_ASSET_PAIRS_URL,
             timeout=aiohttp.ClientTimeout(total=15)
         ) as resp:
             data = await resp.json()
-            if data.get("error"):
-                return []
-            pairs = []
-            for pair_name, info in data["result"].items():
-                quote = info.get("quote", "")
-                if quote not in ("ZUSD", "USD"):
-                    continue
-                leverage_buy = info.get("leverage_buy", [])
-                if not leverage_buy:
-                    continue
-                if pair_name.endswith(".d"):
-                    continue
-                base = info.get("base", "")
-                stables = {"USDT", "USDC", "DAI", "ZUSD", "PAXG", "XAUT"}
-                if base in stables:
-                    continue
-                altname = info.get("altname", pair_name)
-                symbol = altname.replace("/", "").replace("XBT", "BTC")
-                pairs.append({
-                    "symbol":   symbol,
-                    "pair":     altname,
-                    "interval": 60,
-                    "max_lev":  max(leverage_buy),
-                })
-            pairs.sort(key=lambda x: x["max_lev"], reverse=True)
-            log.info(f"✅ 获取到 {len(pairs)} 个支持杠杆的 USD 交易对")
-            return pairs
+            if not data.get("error"):
+                for pair_name, info in data["result"].items():
+                    quote = info.get("quote", "")
+                    if quote not in ("ZUSD", "USD"):
+                        continue
+                    leverage_buy = info.get("leverage_buy", [])
+                    if not leverage_buy:
+                        continue
+                    if pair_name.endswith(".d"):
+                        continue
+                    base = info.get("base", "")
+                    stables = {"USDT", "USDC", "DAI", "ZUSD", "PAXG", "XAUT"}
+                    if base in stables:
+                        continue
+                    altname = info.get("altname", pair_name)
+                    symbol = altname.replace("/", "").replace("XBT", "BTC")
+                    if symbol not in known_symbols:
+                        KNOWN_PAIRS.append({
+                            "symbol":   symbol,
+                            "pair":     altname,
+                            "interval": 60,
+                            "max_lev":  max(leverage_buy),
+                        })
+                        log.info(f"新增交易对: {symbol}")
     except Exception as e:
-        log.error(f"获取交易对异常: {e}")
-        return []
+        log.warning(f"API检查新交易对失败: {e}")
+    log.info(f"✅ 共 {len(KNOWN_PAIRS)} 个杠杆 USD 交易对")
+    return KNOWN_PAIRS
+
 
 # ─── K 线获取 ─────────────────────────────────────────────────────────────────
 
@@ -158,11 +182,6 @@ def detect_bearish_engulfing(candles):
 
     # 条件5：红柱引线（最高价）严格大于绿柱引线（最高价）
     if curr["high"] <= prev["high"]:
-        return False
-
-    # 条件6：成交量放大
-    avg_vol = sum(c["volume"] for c in candles[-7:-2]) / 5
-    if avg_vol > 0 and curr["volume"] < avg_vol * PARAMS["volume_surge_ratio"]:
         return False
 
     return True
