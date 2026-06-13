@@ -42,6 +42,7 @@ KRAKEN_ASSET_PAIRS_URL = "https://api.kraken.com/0/public/AssetPairs"
 KRAKEN_OHLC_URL        = "https://api.kraken.com/0/public/OHLC"
 
 async def fetch_margin_usd_pairs(session):
+    # 只使用 App 确认可以开杠杆的交易对，不自动从 API 添加
     KNOWN_PAIRS = [
         {"symbol": "BTCUSD",  "pair": "XBT/USD",  "interval": 60, "max_lev": 10},
         {"symbol": "ETHUSD",  "pair": "ETH/USD",  "interval": 60, "max_lev": 10},
@@ -66,40 +67,8 @@ async def fetch_margin_usd_pairs(session):
         {"symbol": "TRXUSD",  "pair": "TRX/USD",  "interval": 60, "max_lev": 5},
         {"symbol": "CRVUSD",  "pair": "CRV/USD",  "interval": 60, "max_lev": 5},
         {"symbol": "HBARUSD", "pair": "HBAR/USD", "interval": 60, "max_lev": 5},
+        {"symbol": "PAXGUSD", "pair": "PAXG/USD", "interval": 60, "max_lev": 5},
     ]
-    known_symbols = {p["symbol"] for p in KNOWN_PAIRS}
-    try:
-        async with session.get(
-            KRAKEN_ASSET_PAIRS_URL,
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            data = await resp.json()
-            if not data.get("error"):
-                for pair_name, info in data["result"].items():
-                    quote = info.get("quote", "")
-                    if quote not in ("ZUSD", "USD"):
-                        continue
-                    leverage_buy = info.get("leverage_buy", [])
-                    if not leverage_buy:
-                        continue
-                    if pair_name.endswith(".d"):
-                        continue
-                    base = info.get("base", "")
-                    stables = {"USDT", "USDC", "DAI", "ZUSD", "PAXG", "XAUT"}
-                    if base in stables:
-                        continue
-                    altname = info.get("altname", pair_name)
-                    symbol = altname.replace("/", "").replace("XBT", "BTC")
-                    if symbol not in known_symbols:
-                        KNOWN_PAIRS.append({
-                            "symbol":   symbol,
-                            "pair":     altname,
-                            "interval": 60,
-                            "max_lev":  max(leverage_buy),
-                        })
-                        log.info(f"新增交易对: {symbol}")
-    except Exception as e:
-        log.warning(f"API检查新交易对失败: {e}")
     log.info(f"✅ 共 {len(KNOWN_PAIRS)} 个杠杆 USD 交易对")
     return KNOWN_PAIRS
 
