@@ -34,7 +34,7 @@ PARAMS = {
     "parallel_body_top_pct": 1.5,  # 实体顶部差距 <= 1.5%
 }
 
-POLL_INTERVAL = 120
+POLL_INTERVAL = 60  # 备用轮询间隔
 
 # ─── 自动获取 Kraken 杠杆 USD 交易对 ─────────────────────────────────────────
 
@@ -267,8 +267,21 @@ async def run():
 
                 await asyncio.sleep(1.5)
 
-            log.info(f"扫描完成，{POLL_INTERVAL}秒后下次扫描...")
-            await asyncio.sleep(POLL_INTERVAL)
+            # 智能等待：在每小时整点后1分钟扫描，最及时捕捉K线收盘
+            now = datetime.utcnow()
+            # 计算距离下一个整点还有多少秒
+            seconds_past_hour = now.minute * 60 + now.second
+            seconds_to_next_hour = 3600 - seconds_past_hour
+            
+            if seconds_to_next_hour > 90:
+                # 距离整点超过90秒，等到整点后1分钟
+                wait = seconds_to_next_hour + 60
+            else:
+                # 已经在整点附近，等60秒后再扫
+                wait = 60
+            
+            log.info(f"扫描完成，{wait}秒后下次扫描（下一整点后1分钟）...")
+            await asyncio.sleep(wait)
 
 if __name__ == "__main__":
     asyncio.run(run())
