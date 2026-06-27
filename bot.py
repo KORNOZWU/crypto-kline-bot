@@ -138,6 +138,10 @@ def detect_bearish_engulfing(candles):
     if c3["close"] <= c2["close"]:
         return False
 
+    # 条件1：前3根引线顶部逐渐升高 c1.high < c2.high < c3.high
+    if not (c1["high"] < c2["high"] < c3["high"]):
+        return False
+
     # 条件3：红柱实体完全吞没绿柱实体
     if curr["close"] >= prev["open"]:
         return False
@@ -151,6 +155,10 @@ def detect_bearish_engulfing(candles):
 
     # 条件5：红柱引线（最高价）严格大于绿柱引线（最高价）
     if curr["high"] <= prev["high"]:
+        return False
+
+    # 条件6：红柱下引线严格长于绿柱下引线
+    if curr["low"] >= prev["low"]:
         return False
 
     return True
