@@ -153,10 +153,13 @@ def detect_bearish_engulfing(candles):
     if body_top_diff_pct > PARAMS["parallel_body_top_pct"]:
         return False
 
-    # 条件5：绿柱上引线不能太长（上引线 <= 实体的50%）
-    prev_body = abs(prev["close"] - prev["open"])
-    prev_upper_shadow = prev["high"] - max(prev["close"], prev["open"])
-    if prev_body > 0 and prev_upper_shadow > prev_body * 0.5:
+    # 条件5：红柱最高价 >= 绿柱最高价（不能低于绿柱顶部）
+    if curr["high"] < prev["high"]:
+        return False
+
+    # 条件5b：红柱最高价不能高于绿柱太多（差距 <= 1.5%）
+    high_diff_pct = (curr["high"] - prev["high"]) / prev["high"] * 100
+    if high_diff_pct > 1.5:
         return False
 
     # 条件6：红柱下引线严格长于绿柱下引线
