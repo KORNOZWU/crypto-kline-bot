@@ -1,8 +1,6 @@
 """
 Crypto K-Line Short Signal Bot — Kraken Edition
 看跌吞没做空信号（严格版）
-条件4：实体顶部平行（差距 <= 1.5%）
-条件5：红柱引线严格高于绿柱引线
 """
 
 import os
@@ -31,18 +29,17 @@ TAKE_PROFIT_PCT = 1.5
 STOP_LOSS_PCT   = 1.0
 
 PARAMS = {
-    "parallel_body_top_pct": 1.5,  # 实体顶部差距 <= 1.5%
+    "body_top_diff_pct": 1.5,  # 实体顶部差距 <= 1.5%
+    "high_diff_pct":     1.5,  # 引线最高价差距 <= 1.5%
 }
 
-POLL_INTERVAL = 60  # 备用轮询间隔
+POLL_INTERVAL = 60
 
-# ─── 自动获取 Kraken 杠杆 USD 交易对 ─────────────────────────────────────────
+KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
 
-KRAKEN_ASSET_PAIRS_URL = "https://api.kraken.com/0/public/AssetPairs"
-KRAKEN_OHLC_URL        = "https://api.kraken.com/0/public/OHLC"
+# ─── 硬编码 App 确认的杠杆交易对 ──────────────────────────────────────────────
 
 async def fetch_margin_usd_pairs(session):
-    # 只使用 App 确认可以开杠杆的交易对，不自动从 API 添加
     KNOWN_PAIRS = [
         {"symbol": "BTCUSD",  "pair": "XBT/USD",  "interval": 60, "max_lev": 10},
         {"symbol": "ETHUSD",  "pair": "ETH/USD",  "interval": 60, "max_lev": 10},
@@ -72,7 +69,6 @@ async def fetch_margin_usd_pairs(session):
     log.info(f"✅ 共 {len(KNOWN_PAIRS)} 个杠杆 USD 交易对")
     return KNOWN_PAIRS
 
-
 # ─── K 线获取 ─────────────────────────────────────────────────────────────────
 
 async def fetch_klines(session, watch, limit=20):
@@ -100,69 +96,78 @@ async def fetch_klines(session, watch, limit=20):
     except Exception:
         return []
 
-# ─── 看跌吞没检测 ─────────────────────────────────────────────────────────────
+# ─── 看跌吞没检测（6个条件）──────────────────────────────────────────────────
 
 def detect_bearish_engulfing(candles):
     """
-    条件1：前3根结构 — c1(红或绿) + c2(绿) + c3(绿↑)
+    条件1：前3根 c1、c2、c3
+           - c2、c3 必须是绿柱
+           - c2、c3 收盘价逐渐升高
+           - c1.high < c2.high < c3.high（引线顶部逐渐升高）
     条件2：prev 是绿柱
-    条件3：curr 是红柱，实体完全吞没 prev 实体
-    条件4：实体顶部平行 — max(curr.open,curr.close) vs max(prev.open,prev.close) 差距 ≤ 1.5%
-    条件5：红柱引线严格高于绿柱引线 — curr.high > prev.high
-    条件6：成交量放大
+    条件3：curr 是红柱，实体完全吞没 prev 实体（curr.close < prev.open）
+    条件4：实体顶部平行
+           - 红柱实体顶部 >= 绿柱实体顶部
+           - 差距 <= 1.5%
+    条件5：引线顶部平行
+           - 红柱最高价 >= 绿柱最高价
+           - 差距 <= 1.5%
+    条件6：红柱最低价 < 绿柱最低价（下引线突破）
     """
     if len(candles) < 8:
         return False
 
-    prev = candles[-2]
-    curr = candles[-1]
     c1   = candles[-5]
     c2   = candles[-4]
     c3   = candles[-3]
-
-    # 条件2：prev 阳线
-    if prev["close"] <= prev["open"]:
-        return False
-
-    # 条件3：curr 阴线
-    if curr["close"] >= curr["open"]:
-        return False
+    prev = candles[-2]  # 绿柱
+    curr = candles[-1]  # 红柱
 
     # 条件1：c2 必须绿柱
     if c2["close"] <= c2["open"]:
         return False
 
-    # 条件1：c3 必须绿柱且收盘 > c2
+    # 条件1：c3 必须绿柱
     if c3["close"] <= c3["open"]:
         return False
+
+    # 条件1：收盘价逐渐升高
     if c3["close"] <= c2["close"]:
         return False
 
-    # 条件1：前3根引线顶部逐渐升高 c1.high < c2.high < c3.high
+    # 条件1：引线顶部逐渐升高
     if not (c1["high"] < c2["high"] < c3["high"]):
         return False
 
-    # 条件3：红柱实体完全吞没绿柱实体
+    # 条件2：prev 必须绿柱
+    if prev["close"] <= prev["open"]:
+        return False
+
+    # 条件3：curr 必须红柱
+    if curr["close"] >= curr["open"]:
+        return False
+
+    # 条件3：实体完全吞没（红收盘 < 绿开盘）
     if curr["close"] >= prev["open"]:
         return False
 
-    # 条件4：实体顶部平行（用实体最高点比较）
+    # 条件4：实体顶部 — 红柱实体顶 >= 绿柱实体顶，差距 <= 1.5%
     curr_body_top = max(curr["open"], curr["close"])
     prev_body_top = max(prev["open"], prev["close"])
-    body_top_diff_pct = abs(curr_body_top - prev_body_top) / prev_body_top * 100
-    if body_top_diff_pct > PARAMS["parallel_body_top_pct"]:
+    if curr_body_top < prev_body_top:
+        return False
+    body_top_diff = (curr_body_top - prev_body_top) / prev_body_top * 100
+    if body_top_diff > PARAMS["body_top_diff_pct"]:
         return False
 
-    # 条件5：红柱最高价 >= 绿柱最高价（不能低于绿柱顶部）
+    # 条件5：引线顶部 — 红柱最高 >= 绿柱最高，差距 <= 1.5%
     if curr["high"] < prev["high"]:
         return False
-
-    # 条件5b：红柱最高价不能高于绿柱太多（差距 <= 1.5%）
-    high_diff_pct = (curr["high"] - prev["high"]) / prev["high"] * 100
-    if high_diff_pct > 1.5:
+    high_diff = (curr["high"] - prev["high"]) / prev["high"] * 100
+    if high_diff > PARAMS["high_diff_pct"]:
         return False
 
-    # 条件6：红柱下引线严格长于绿柱下引线
+    # 条件6：红柱下引线突破绿柱下引线
     if curr["low"] >= prev["low"]:
         return False
 
@@ -201,10 +206,11 @@ def format_alert(symbol, interval_label, price, dt, max_lev, open_time):
         f"🛑 止损价：<code>${sl_price:,.4f}</code>  (+{STOP_LOSS_PCT}%)\n"
         f"⏰ 建议平仓：<b>{close_time} UTC</b>（4小时后）\n"
         f"━━━━━━━━━━━━━━\n"
-        f"✅ 局部反弹结构\n"
+        f"✅ 前3根引线逐渐升高\n"
         f"✅ 红柱实体完全吞没绿柱\n"
         f"✅ 实体顶部平行（≤1.5%）\n"
-        f"✅ 红柱引线突破绿柱引线\n"
+        f"✅ 引线顶部平行（≤1.5%）\n"
+        f"✅ 红柱下引线突破绿柱\n"
         f"\n⚠️ 仅供参考，注意风险管理"
     )
 
@@ -231,30 +237,16 @@ async def run():
 
     async with aiohttp.ClientSession() as session:
         watch_list = await fetch_margin_usd_pairs(session)
-        if not watch_list:
-            watch_list = [
-                {"symbol": "SOLUSD",  "pair": "SOL/USD",  "interval": 60, "max_lev": 10},
-                {"symbol": "ETHUSD",  "pair": "ETH/USD",  "interval": 60, "max_lev": 10},
-                {"symbol": "BTCUSD",  "pair": "XBT/USD",  "interval": 60, "max_lev": 10},
-            ]
 
         await send_telegram(session,
             f"🤖 <b>做空信号 Bot 已启动</b>\n"
-            f"📌 形态：看跌吞没\n"
+            f"📌 形态：看跌吞没（6个条件）\n"
             f"🎯 止盈：{TAKE_PROFIT_PCT}%  🛑 止损：{STOP_LOSS_PCT}%\n"
             f"📊 共监控 <b>{len(watch_list)}</b> 个杠杆 USD 交易对\n"
-            f"扫描间隔：每{POLL_INTERVAL//60}分钟"
+            f"⏱ 整点后1分钟立即扫描"
         )
 
-        last_refresh = time.time()
-
         while True:
-            if time.time() - last_refresh > 86400:
-                new_list = await fetch_margin_usd_pairs(session)
-                if new_list:
-                    watch_list = new_list
-                    last_refresh = time.time()
-
             log.info(f"--- 开始扫描 {len(watch_list)} 个交易对 ---")
             for watch in watch_list:
                 try:
@@ -272,7 +264,8 @@ async def run():
                         if dedup.should_send(key):
                             log.info(f"🔴 做空信号: {watch['symbol']} @ ${price:,.4f}")
                             await send_telegram(session, format_alert(
-                                watch["symbol"], interval_label, price, dt, watch["max_lev"], latest["open_time"]
+                                watch["symbol"], interval_label, price, dt,
+                                watch["max_lev"], latest["open_time"]
                             ))
 
                 except Exception as e:
@@ -280,19 +273,16 @@ async def run():
 
                 await asyncio.sleep(1.5)
 
-            # 智能等待：在每小时整点后1分钟扫描，最及时捕捉K线收盘
+            # 智能等待：整点后1分钟扫描
             now = datetime.utcnow()
-            # 计算距离下一个整点还有多少秒
             seconds_past_hour = now.minute * 60 + now.second
             seconds_to_next_hour = 3600 - seconds_past_hour
-            
+
             if seconds_to_next_hour > 90:
-                # 距离整点超过90秒，等到整点后1分钟
                 wait = seconds_to_next_hour + 60
             else:
-                # 已经在整点附近，等60秒后再扫
                 wait = 60
-            
+
             log.info(f"扫描完成，{wait}秒后下次扫描（下一整点后1分钟）...")
             await asyncio.sleep(wait)
 
